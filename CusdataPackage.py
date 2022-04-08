@@ -1,9 +1,17 @@
 from doctest import master
 from select import select
+from sys import stderr, stdout
+from threading import Thread
 import tkinter as tk
 from tkinter import Button, ttk
+from tkinter import messagebox
 from turtle import width
 import openpyxl
+from SSHManager import SSHManager
+import sched
+import datetime
+import time
+
 
 
 class LoginFrame(tk.Frame):
@@ -44,6 +52,17 @@ class LoginFrame(tk.Frame):
 
     def login_check(self):
         print("login check,hostname:",self.hostname.get(),"username:",self.username.get(),"password:",self.password.get())
+        #global g_SSHManager
+        res_code = g_SSHManager.ssh_connect(hostname=g_HostName,username=g_UserName,password=g_PassWord)
+        global g_Login_Success
+        if res_code == 1000:
+            print("Login Success")
+            g_Login_Success = True
+            messagebox.showinfo(title="Message",message="Login Success")
+        else:  
+            print("Login Fail")
+            g_Login_Success = False   
+            messagebox.showerror(title="Error",message="Login Fail")  
 
 
 class BuildFrame(tk.Frame): #继承Frame类
@@ -74,9 +93,9 @@ class BuildFrame(tk.Frame): #继承Frame类
         self.version_cbb.bind("<<ComboboxSelected>>",self.select_version)
         self.version_cbb.grid(row=1,column=1,sticky="we")
 
-        self.build_button = ttk.Button(self,text="Build",command=self.check_build)
+        self.build_button = ttk.Button(self,text="Build",command=self.build_clicked)
         self.build_button.grid(row=0,column=3,padx=20)
-        self.cancel_button = ttk.Button(self,text="Cancel",command=self.check_cancel)
+        self.cancel_button = ttk.Button(self,text="Cancel",command=self.cancel_clicked)
         self.cancel_button.grid(row=1,column=3,padx=20)
 
     def select_region(self,event):
@@ -89,11 +108,66 @@ class BuildFrame(tk.Frame): #继承Frame类
         global g_Version
         g_Version = self.version.get()
 
-    def check_build(self):
+
+    def build_clicked(self):
         print("Start Build, Region:",g_Region," Version:",g_Version,"CodePath:",g_Version_Path[g_Version])
-    
-    def check_cancel(self):
+        if g_Login_Success: 
+            if not self.isCodeBuiltAll():return
+            stdout = g_SSHManager.ssh_exec_command(f"bash {g_Scripts_Path}/Start_Cusdata_Auto_Package.sh {g_Region} {g_Version_Path[g_Version]}")
+            print("stdout:",stdout)
+            g_Build_Checking = True
+            self.build_button["text"] = "Building"
+            self.build_button["state"] = "disabled"
+            self.scheduler_check = g_Scheduler.enter(10,1,self.build_check,()) # 每隔10秒执行一次，优先级为1，需要执行的目标函数为build_check，这里build_check函数无需传参
+            self.thread_check = Thread(target=g_Scheduler.run)
+            self.thread_check.start()
+        else:
+            print("Please Login First")
+            messagebox.showerror(title="Error",message="Please Login First")
+            return   
+             
+    def cancel_clicked(self):
         print("Cancel Build")
+        stdout = g_SSHManager.ssh_exec_command(f"bash {g_Scripts_Path}/Stop_Cusdata_Auto_Package.sh")
+        print("Cancel Result:",stdout)
+        self.build_button["text"] = "Build"
+        self.build_button["state"] = "normal"
+        g_Scheduler.cancel(self.build_check)
+
+    
+    def build_check(self):
+        self.scheduler_check = g_Scheduler.enter(10,1,self.build_check,())
+        print("cur time:",datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        result = g_SSHManager.ssh_exec_command('[ -f /home/SDD_DISK/publisherB/SA_Build_Cusdata_Success ] && echo yes || echo no')
+        print('build_check result1:',result.strip("\r\n"))
+        if result.strip("\r\n") == "yes":
+            print("Cusdata Package Success")
+            messagebox.showinfo(title="Message",message="Cusdata Package Success")
+            self.build_button["text"] = "Build"
+            self.build_button["state"] = "normal"
+            g_Scheduler.cancel(self.scheduler_check)
+            g_Build_Checking = False
+            return
+        result = g_SSHManager.ssh_exec_command('[ -f /home/SDD_DISK/publisherB/SA_Build_Cusdata_Error ] && echo yes || echo no')
+        print('build_check result2:',result.strip("\r\n"))
+        if result.strip("\r\n") == "yes":
+            print("Cusdata Package Fail")
+            messagebox.showinfo(title="Message",message="Cusdata Package Fail")
+            self.build_button["text"] = "Build"
+            self.build_button["state"] = "normal"
+            g_Scheduler.cancel(self.scheduler_check)
+            g_Build_Checking = False
+            return
+
+    def isCodeBuiltAll(self):   
+        result = g_SSHManager.ssh_exec_command(f'[ -f {g_Version_Path[g_Version]}/release/out/mediatek_linux/output/upgrade_image.pkg ] && echo yes || echo no')
+        print('isCodeBuiltAll result:',{result})
+        if result.strip('\r\n') == 'no':
+            print('the code has not been built all')
+            messagebox.showerror('Error','the code has not been built all')
+            return False
+        return True
+        
         
 
  #从DataConfig.xlsx获取信息
@@ -136,6 +210,12 @@ if __name__ == "__main__":
     root.geometry("{}x{}+{}+{}".format(win_w,win_h,x,y))
     root.title('9216 Cusdata Package Tool')
     loadDataConfig()
+    global g_SSHManager,g_Login_Success,g_Scripts_Path,g_Scheduler,g_Build_Checking
+    g_Login_Success = False   #用于判断是否登录
+    g_Build_Checking = False  #用于判断是否在build
+    g_Scripts_Path = "/home/SDB_DISK/publisherB/SDD_DISK/MT9216_TARBALL/scripts"
+    g_SSHManager = SSHManager()
+    g_Scheduler = sched.scheduler(time.time,time.sleep)
     login_frame = LoginFrame(master=root)
     build_frame = BuildFrame(master=root)
 
